@@ -4,6 +4,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from .. import cache
 from ..auth import get_current_user
@@ -64,8 +65,11 @@ def create_booking(
 ):
     ratelimit.record_and_check(user.id)
 
-    start = parse_input_datetime(payload.start_time)
-    end = parse_input_datetime(payload.end_time)
+    try:
+        start = parse_input_datetime(payload.start_time)
+        end = parse_input_datetime(payload.end_time)
+    except ValueError:
+        raise AppError(400, "INVALID_BOOKING_WINDOW", "Invalid datetime")
     now = datetime.utcnow()
 
     # Bug fix: strictly in the future, no grace window
@@ -96,19 +100,24 @@ def create_booking(
         _check_quota(db, user.id, now, start)
 
         price_cents = room.hourly_rate_cents * duration_hours
-        booking = Booking(
-            room_id=room.id,
-            user_id=user.id,
-            start_time=start,
-            end_time=end,
-            status="confirmed",
-            reference_code=reference.next_reference_code(),
-            price_cents=price_cents,
-            created_at=now,
-        )
-        db.add(booking)
-        db.commit()
-        db.refresh(booking)
+        while True:
+            booking = Booking(
+                room_id=room.id,
+                user_id=user.id,
+                start_time=start,
+                end_time=end,
+                status="confirmed",
+                reference_code=reference.next_reference_code(),
+                price_cents=price_cents,
+                created_at=now,
+            )
+            db.add(booking)
+            try:
+                db.commit()
+                db.refresh(booking)
+                break
+            except IntegrityError:
+                db.rollback()
 
     stats.record_create(room.id, price_cents)
     # Bug fix: invalidate both availability AND report cache on create

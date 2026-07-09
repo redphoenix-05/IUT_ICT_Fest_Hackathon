@@ -139,3 +139,62 @@
 - **Problem:** Default SQLite database mode blocks concurrent readers during write transactions, slowing down queries under load.
 - **Fix:** Added a connection event listener to configure the SQLite database connection using `PRAGMA journal_mode=WAL` and `PRAGMA synchronous=NORMAL`. This allows concurrent reads while writes are active and speeds up commit disk synchronization.
 
+## Bug 22 - Malformed Booking Datetimes Could Raise Raw ValueError
+- **File/Line:** `app/routers/bookings.py`, booking create datetime parsing block
+- **Difficulty:** Easy
+- **Bug:** `POST /bookings` parsed `start_time` and `end_time` directly with `parse_input_datetime(...)`. If either value was not valid ISO 8601, `datetime.fromisoformat(...)` could raise `ValueError` and leak into a server error path instead of returning an application error.
+- **Fix:** Wrapped the parsing in `try/except ValueError` and now return `400 INVALID_BOOKING_WINDOW`.
+
+## Bug 23 - Persisted Database Could Hit reference_code Unique Constraint On Restart
+- **File/Line:** `app/routers/bookings.py`, booking insert path
+- **Difficulty:** Medium
+- **Bug:** Even after making `reference_code` unique, the in-memory reference counter still restarts from `CW-001000` on process start. If the database already contained older bookings, the next booking insert could fail with `UNIQUE constraint failed: bookings.reference_code`.
+- **Fix:** Wrapped booking insert commit in a retry loop that rolls back on `IntegrityError`, generates the next reference code, and retries until the insert succeeds.
+
+## Verification Update
+- Installed dependencies from `requirements.txt`.
+- Ran `pytest`.
+- Current result: `1 passed`.
+
+## Bug 24 - Duplicate Registration Returned Success Instead of 409 USERNAME_TAKEN
+- **File/Line:** `app/routers/auth.py`, duplicate user branch in `register`
+- **Difficulty:** Easy
+- **Bug:** When a username already existed within the same organization, the endpoint returned the existing user payload instead of the required `409 USERNAME_TAKEN`.
+- **Fix:** Replaced the success return with `raise AppError(409, "USERNAME_TAKEN", ...)`.
+
+## Bug 25 - Logout Revocation Checked sub Instead of jti
+- **File/Line:** `app/auth.py`, access-token revocation check
+- **Difficulty:** Easy
+- **Bug:** Logout stored revoked access tokens by `jti`, but request authentication checked `sub` against the revoked set. Logged-out access tokens therefore stayed valid.
+- **Fix:** Changed the revocation check to use `payload["jti"]`.
+
+## Bug 26 - Access Token Lifetime Was 900 Minutes Instead of 900 Seconds
+- **File/Line:** `app/auth.py`, `create_access_token`
+- **Difficulty:** Easy
+- **Bug:** The code used `timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES * 60)` even though `ACCESS_TOKEN_EXPIRE_MINUTES` was already `15`. That made access tokens live for 900 minutes instead of the required 900 seconds.
+- **Fix:** Changed the lifetime to `timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)`.
+
+## Bug 27 - Refresh Tokens Were Reusable
+- **File/Line:** `app/auth.py`, `app/routers/auth.py`
+- **Difficulty:** Medium
+- **Bug:** `POST /auth/refresh` issued new tokens but did not mark the presented refresh token as consumed, so the same refresh token could be reused repeatedly.
+- **Fix:** Added refresh-token `jti` consumption tracking and reject reuse with `401`.
+
+## Bug 28 - Room Stats Endpoint Returned Stale Derived Values
+- **File/Line:** `app/routers/rooms.py`, `app/services/stats.py`
+- **Difficulty:** Medium
+- **Bug:** `/rooms/{id}/stats` depended on stale in-memory counters instead of values derivable from confirmed bookings themselves.
+- **Fix:** Changed stats lookup to derive count and revenue from the database.
+
+## Bug 29 - Room Creation Did Not Refresh Usage Report Cache
+- **File/Line:** `app/routers/rooms.py`, `create_room`
+- **Difficulty:** Easy
+- **Bug:** Usage reports must include every room in the org, including rooms with zero bookings. Creating a new room left any cached usage report stale until some later invalidation.
+- **Fix:** Added `cache.invalidate_report(admin.org_id)` after room creation.
+
+## Bug 30 - Admin Export Did Not Return 404 For Cross-Org room_id
+- **File/Line:** `app/routers/admin.py`, `export`
+- **Difficulty:** Easy
+- **Bug:** A cross-organization `room_id` could be passed to `/admin/export` and would behave like an empty export instead of non-existent `404 ROOM_NOT_FOUND`.
+- **Fix:** Added an org-scoped room existence check before generating the export.
+
