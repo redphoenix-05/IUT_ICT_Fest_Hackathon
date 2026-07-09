@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
@@ -88,36 +89,40 @@ def create_booking(
     if duration_hours < MIN_DURATION_HOURS or duration_hours > MAX_DURATION_HOURS:
         raise AppError(400, "INVALID_BOOKING_WINDOW", "duration out of range")
 
-    room = db.query(Room).filter(Room.id == payload.room_id, Room.org_id == user.org_id).first()
-    if room is None:
-        raise AppError(404, "ROOM_NOT_FOUND", "Room not found")
-
     # Bug fix: wrap conflict check + quota check + insert in a lock for SQLite concurrency
     with write_lock:
-        if _has_conflict(db, room.id, start, end):
-            raise AppError(409, "ROOM_CONFLICT", "Room already booked for this interval")
+        try:
+            db.execute(text("BEGIN IMMEDIATE"))
+            room = db.query(Room).filter(Room.id == payload.room_id, Room.org_id == user.org_id).first()
+            if room is None:
+                raise AppError(404, "ROOM_NOT_FOUND", "Room not found")
+            if _has_conflict(db, room.id, start, end):
+                raise AppError(409, "ROOM_CONFLICT", "Room already booked for this interval")
 
-        _check_quota(db, user.id, now, start)
+            _check_quota(db, user.id, now, start)
 
-        price_cents = room.hourly_rate_cents * duration_hours
-        while True:
-            booking = Booking(
-                room_id=room.id,
-                user_id=user.id,
-                start_time=start,
-                end_time=end,
-                status="confirmed",
-                reference_code=reference.next_reference_code(),
-                price_cents=price_cents,
-                created_at=now,
-            )
-            db.add(booking)
-            try:
-                db.commit()
-                db.refresh(booking)
-                break
-            except IntegrityError:
-                db.rollback()
+            price_cents = room.hourly_rate_cents * duration_hours
+            while True:
+                booking = Booking(
+                    room_id=room.id,
+                    user_id=user.id,
+                    start_time=start,
+                    end_time=end,
+                    status="confirmed",
+                    reference_code=reference.next_reference_code(),
+                    price_cents=price_cents,
+                    created_at=now,
+                )
+                db.add(booking)
+                try:
+                    db.commit()
+                    db.refresh(booking)
+                    break
+                except IntegrityError:
+                    db.rollback()
+        except AppError:
+            db.rollback()
+            raise
 
     stats.record_create(room.id, price_cents)
     # Bug fix: invalidate both availability AND report cache on create
@@ -192,34 +197,39 @@ def cancel_booking(
 ):
     # Bug fix: wrap cancel in write_lock to prevent double-cancel race
     with write_lock:
-        booking = (
-            db.query(Booking)
-            .join(Room, Booking.room_id == Room.id)
-            .filter(Booking.id == booking_id, Room.org_id == user.org_id)
-            .first()
-        )
-        if booking is None:
-            raise AppError(404, "BOOKING_NOT_FOUND", "Booking not found")
-        if user.role != "admin" and booking.user_id != user.id:
-            raise AppError(404, "BOOKING_NOT_FOUND", "Booking not found")
+        try:
+            db.execute(text("BEGIN IMMEDIATE"))
+            booking = (
+                db.query(Booking)
+                .join(Room, Booking.room_id == Room.id)
+                .filter(Booking.id == booking_id, Room.org_id == user.org_id)
+                .first()
+            )
+            if booking is None:
+                raise AppError(404, "BOOKING_NOT_FOUND", "Booking not found")
+            if user.role != "admin" and booking.user_id != user.id:
+                raise AppError(404, "BOOKING_NOT_FOUND", "Booking not found")
 
-        if booking.status == "cancelled":
-            raise AppError(409, "ALREADY_CANCELLED", "Booking already cancelled")
+            if booking.status == "cancelled":
+                raise AppError(409, "ALREADY_CANCELLED", "Booking already cancelled")
 
-        now = datetime.utcnow()
-        notice = booking.start_time - now
-        # Bug fix: >=48h (was >48), and <24h gives 0% (was 50%)
-        if notice >= timedelta(hours=48):
-            refund_percent = 100
-        elif notice >= timedelta(hours=24):
-            refund_percent = 50
-        else:
-            refund_percent = 0
+            now = datetime.utcnow()
+            notice = booking.start_time - now
+            # Bug fix: >=48h (was >48), and <24h gives 0% (was 50%)
+            if notice >= timedelta(hours=48):
+                refund_percent = 100
+            elif notice >= timedelta(hours=24):
+                refund_percent = 50
+            else:
+                refund_percent = 0
 
-        # Bug fix: set status before refund log so it's all in one atomic transaction
-        booking.status = "cancelled"
-        refund_log = log_refund(db, booking, refund_percent)
-        db.commit()
+            # Bug fix: set status before refund log so it's all in one atomic transaction
+            booking.status = "cancelled"
+            refund_log = log_refund(db, booking, refund_percent)
+            db.commit()
+        except AppError:
+            db.rollback()
+            raise
 
     stats.record_cancel(booking.room_id, booking.price_cents)
     # Bug fix: invalidate both report AND availability cache on cancel

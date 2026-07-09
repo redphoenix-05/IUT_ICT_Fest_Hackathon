@@ -18,12 +18,7 @@ from .config import (
 )
 from .database import get_db
 from .errors import AppError
-from .models import User
-
-# Access tokens presented to /auth/logout are recorded here so they can no
-# longer be used.
-_revoked_tokens: set[str] = set()
-_used_refresh_tokens: set[str] = set()
+from .models import TokenJTI, User
 
 _PBKDF2_ROUNDS = 100_000
 security_scheme = HTTPBearer(auto_error=False)
@@ -85,18 +80,28 @@ def decode_token(token: str) -> dict:
         raise AppError(401, "UNAUTHORIZED", "Invalid or expired token")
 
 
-def revoke_access_token(payload: dict) -> None:
-    _revoked_tokens.add(payload["jti"])
-
-
-def consume_refresh_token(payload: dict) -> None:
+def revoke_access_token(payload: dict, db: Session) -> None:
     jti = payload["jti"]
-    if jti in _used_refresh_tokens:
+    exists = db.query(TokenJTI).filter(TokenJTI.jti == jti).first()
+    if exists is None:
+        db.add(TokenJTI(jti=jti, token_type="access"))
+        db.commit()
+
+
+def consume_refresh_token(payload: dict, db: Session) -> None:
+    jti = payload["jti"]
+    exists = db.query(TokenJTI).filter(TokenJTI.jti == jti).first()
+    if exists is not None:
         raise AppError(401, "UNAUTHORIZED", "Invalid or expired token")
-    _used_refresh_tokens.add(jti)
+    db.add(TokenJTI(jti=jti, token_type="refresh"))
+    db.commit()
 
 
-def get_token_payload(request: Request, token_creds=Depends(security_scheme)) -> dict:
+def get_token_payload(
+    request: Request,
+    token_creds=Depends(security_scheme),
+    db: Session = Depends(get_db),
+) -> dict:
     header = request.headers.get("Authorization")
     if not header or not header.startswith("Bearer "):
         raise AppError(401, "UNAUTHORIZED", "Missing bearer token")
@@ -104,7 +109,8 @@ def get_token_payload(request: Request, token_creds=Depends(security_scheme)) ->
     payload = decode_token(token)
     if payload.get("type") != "access":
         raise AppError(401, "UNAUTHORIZED", "Wrong token type")
-    if payload.get("jti") in _revoked_tokens:
+    revoked = db.query(TokenJTI).filter(TokenJTI.jti == payload["jti"]).first()
+    if revoked is not None:
         raise AppError(401, "UNAUTHORIZED", "Token has been revoked")
     return payload
 
