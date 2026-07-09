@@ -207,15 +207,9 @@ def cancel_booking(
         else:
             refund_percent = 0
 
-        # Bug fix: use Decimal half-up rounding instead of Python's banker's round()
-        refund_amount_cents = int(
-            (Decimal(booking.price_cents) * Decimal(refund_percent) / Decimal(100))
-            .quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-        )
-
         # Bug fix: set status before refund log so it's all in one atomic transaction
         booking.status = "cancelled"
-        log_refund(db, booking, refund_percent)
+        refund_log = log_refund(db, booking, refund_percent)
         db.commit()
 
     stats.record_cancel(booking.room_id, booking.price_cents)
@@ -228,5 +222,5 @@ def cancel_booking(
         "id": booking.id,
         "status": "cancelled",
         "refund_percent": refund_percent,
-        "refund_amount_cents": refund_amount_cents,
+        "refund_amount_cents": refund_log.amount_cents,
     }
