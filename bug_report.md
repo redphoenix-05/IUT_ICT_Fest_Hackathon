@@ -198,3 +198,15 @@
 - **Bug:** A cross-organization `room_id` could be passed to `/admin/export` and would behave like an empty export instead of non-existent `404 ROOM_NOT_FOUND`.
 - **Fix:** Added an org-scoped room existence check before generating the export.
 
+## Bug 31 - Logout And Refresh Token Invalidation Were Only Process-Local
+- **File/Line:** `app/auth.py`, `app/models.py`, `app/routers/auth.py`
+- **Difficulty:** Hard
+- **Bug:** Revoked access tokens and consumed refresh tokens were tracked only in in-memory Python sets. In a multi-process deployment, one worker could revoke or consume a token while another worker would still accept it.
+- **Fix:** Added a database-backed `TokenJTI` table and moved both access-token revocation and refresh-token consumption checks to the database.
+
+## Bug 32 - Booking Create/Cancel Serialization Relied Only On In-Process Locking
+- **File/Line:** `app/routers/bookings.py`
+- **Difficulty:** Hard
+- **Bug:** The code used a Python `write_lock`, which only coordinates threads inside one process. Separate processes could still race on booking creation and cancellation checks.
+- **Fix:** Added `BEGIN IMMEDIATE` inside the critical booking create/cancel sections so SQLite acquires its cross-process write lock before overlap/quota/cancel checks run.
+
