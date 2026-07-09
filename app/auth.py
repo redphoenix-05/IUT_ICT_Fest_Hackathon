@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import jwt
 from fastapi import Depends, Request
+from fastapi.security import HTTPBearer
 from sqlalchemy.orm import Session
 
 from .config import (
@@ -25,6 +26,7 @@ _revoked_tokens: set[str] = set()
 _used_refresh_tokens: set[str] = set()
 
 _PBKDF2_ROUNDS = 100_000
+security_scheme = HTTPBearer(auto_error=False)
 
 
 def hash_password(password: str) -> str:
@@ -94,7 +96,7 @@ def consume_refresh_token(payload: dict) -> None:
     _used_refresh_tokens.add(jti)
 
 
-def get_token_payload(request: Request) -> dict:
+def get_token_payload(request: Request, token_creds=Depends(security_scheme)) -> dict:
     header = request.headers.get("Authorization")
     if not header or not header.startswith("Bearer "):
         raise AppError(401, "UNAUTHORIZED", "Missing bearer token")
