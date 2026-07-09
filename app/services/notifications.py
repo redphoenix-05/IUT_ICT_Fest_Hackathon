@@ -14,6 +14,29 @@ _audit_lock = threading.Lock()
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
 
+class EagerRefund:
+    def __init__(self, refund):
+        self.id = refund.id
+        self.booking_id = refund.booking_id
+        self.amount_cents = refund.amount_cents
+        self.status = refund.status
+        self.processed_at = refund.processed_at
+
+
+class EagerBooking:
+    def __init__(self, booking):
+        self.id = booking.id
+        self.room_id = booking.room_id
+        self.user_id = booking.user_id
+        self.start_time = booking.start_time
+        self.end_time = booking.end_time
+        self.status = booking.status
+        self.reference_code = booking.reference_code
+        self.price_cents = booking.price_cents
+        self.created_at = booking.created_at
+        self.refunds = [EagerRefund(r) for r in (getattr(booking, "refunds", None) or [])]
+
+
 def _send_email(kind: str, booking) -> None:
     # Simulated SMTP round-trip.
     time.sleep(0.12)
@@ -32,7 +55,8 @@ def _notify_created_sync(booking) -> None:
 
 
 def notify_created(booking) -> None:
-    _executor.submit(_notify_created_sync, booking)
+    eager_booking = EagerBooking(booking)
+    _executor.submit(_notify_created_sync, eager_booking)
 
 
 def _notify_cancelled_sync(booking) -> None:
@@ -43,4 +67,5 @@ def _notify_cancelled_sync(booking) -> None:
 
 
 def notify_cancelled(booking) -> None:
-    _executor.submit(_notify_cancelled_sync, booking)
+    eager_booking = EagerBooking(booking)
+    _executor.submit(_notify_cancelled_sync, eager_booking)
